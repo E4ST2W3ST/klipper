@@ -20,7 +20,18 @@ SERIAL_HEADER_BYTE_2 = 0xa5
 DGUS_CMD_WRITEVAR = 0x82
 DGUS_CMD_READVAR = 0x83
 
-DGUS_KEY_BED_LEVEL = 0X1044
+DGUS_KEY_MAIN_PAGE = 0x1002
+DGUS_KEY_ADJUSTMENT = 0x1004
+DGUS_KEY_TEMP_SCREEN = 0x1030
+DGUS_KEY_COOL_SCREEN = 0x1032
+DGUS_KEY_HEATER0_TEMP_ENTER = 0x1034
+DGUS_KEY_HOTBED_TEMP_ENTER = 0x103A
+DGUS_KEY_SETTING_SCREEN = 0x103E
+DGUS_KEY_BED_LEVEL = 0x1044
+DGUS_KEY_AXIS_PAGE_SELECT = 0x1046
+DGUS_KEY_XAXIS_MOVE_KEY = 0x1048
+DGUS_KEY_YAXIS_MOVE_KEY = 0x104A
+DGUS_KEY_ZAXIS_MOVE_KEY = 0x104C
 
 class Message:
     DATAGRAM_STATE_NONE = 0
@@ -58,15 +69,16 @@ class PrinterSerialBridge:
         self.log("Init")
         self._serial_state = None
         self._serial_state = SERIAL_STATE_HEADER_NONE
-
+        self._axis_unit = 1
         self.printer = config.get_printer()
         self.name = config.get_name()
         self.reactor = self.printer.get_reactor()
         self.printer.load_object(config, 'heaters')
         self.log(config.getlist('heater', ("extruder", "heater_bed")))
         self.heater_names = config.getlist("heater", ("extruder", "heater_bed"))
+        self._gcode_event_script = ''
         self.heaters = []
- 
+
         self.leds = []
 
         self.printer.register_event_handler("klippy:ready", self.handle_ready)
@@ -84,7 +96,7 @@ class PrinterSerialBridge:
         self.mcu = pin_params['chip']
         self.oid = self.mcu.create_oid()
         self.mcu.register_config_callback(self.build_config)
-        self._update_interval = .5
+        self._update_interval = 2
         self._update_timer = self.reactor.register_timer(self._send_update)
         self.gcode = self.printer.lookup_object('gcode')
 
@@ -96,17 +108,41 @@ class PrinterSerialBridge:
     def _send_update(self, eventtime):
         self.log("Send update timer")
         for heater in self.heaters:            
-            current_temp, target_temp = heater.get_temp(eventtime)
-            self.log("Temp: " + str(current_temp))
+            current_temp, target_temp = heater.get_temp(eventtime)            
             if(heater.name == 'heater_bed'):
-                self.send_text("main.bedtemp.txt=\"" f'{current_temp:.2f}' + "\"")
+                self.send_text("main.bedtemp.txt=\"" f'{current_temp:.0f} / {target_temp:.0f}' + "\"")
             else:
-                self.send_text("main.nozzletemp.txt=\"" f'{current_temp:.2f}' + "\"")
+                self.send_text("main.nozzletemp.txt=\"" f'{current_temp:.0f} / {target_temp:.0f}' + "\"")
         
         if self._is_led_on(eventtime):
             self.send_text("status_led2=1")
         else:
             self.send_text("status_led2=0")
+
+        g_status = self.printer.lookup_object("gcode_move").get_status()
+        self.log(f"status: { g_status}")
+
+        self.send_text(f"main.xvalue.val={(g_status['position'].x * 100):.0f}")
+        self.send_text(f"main.yvalue.val={(g_status['position'].y * 100):.0f}")
+        self.send_text(f"main.zvalue.val={(g_status['position'].z * 1000):.0f}")
+
+        self.send_text(f"printpause.zvalue.val={(g_status['position'].z * 10):.0f}")
+        
+        heater_fans = self.printer.lookup_objects('heater_fan')
+        #self.log(f'Fans: {fans}')
+
+        for (name, fan) in heater_fans:
+            pass
+            #self.log(f'Fan status: {fan.get_status(eventtime)}')
+            #self.send_text(f"printpaause.fanspeed.txt={fan.get_status(eventtime)['speed'] * 100}")
+        #fan = self.printer.lookup_object("heater_fan")
+        #self.log(f"Heater fan: {fan.get_status()}")
+        #
+
+        fan = self.printer.lookup_object("fan")
+        self.send_text(f"printpause.fanspeed.txt=\"{(fan.get_status(eventtime)['speed'] * 100):.0f}%\"")
+
+        #self.send
 
         return eventtime + self._update_interval
 
@@ -214,9 +250,12 @@ class PrinterSerialBridge:
     def process_message(self, message):
         self.log("Process message: " + str(message))
 
+        move = self.printer.lookup_object("gcode_move")
+        extrusion_factor = move.extrude_factor
+
         if(message.command == DGUS_CMD_READVAR):
             if(message.command_address == DGUS_KEY_BED_LEVEL):
-                if(message.command_data[0] == 0x8):
+                if(message.command_data[0] == 0x8): #light toggle
                     self.log("Requested light toggle")
                     pled = self.printer.lookup_object("led")
                     for n in pled.led_helpers.keys():
@@ -227,7 +266,101 @@ class PrinterSerialBridge:
                         if(white > 0):
                             self.gcode.run_script(f"SET_LED LED={n} WHITE=0")
                         else:
-                            self.gcode.run_script(f"SET_LED LED={n} WHITE=1")       
+                            self.gcode.run_script(f"SET_LED LED={n} WHITE=1")
+                if(message.command_data[0] == 0x0a):
+                    pass
+            if message.command_address == DGUS_KEY_TEMP_SCREEN:
+                if message.command_data[0] == 0x5:
+                    self._axis_unit = 0.1
+                if message.command_data[0] == 0x6:
+                    self._axis_unit = 1.0
+                if message.command_data[0] == 0x7:
+                    self._axis_unit = 10.0
+            if message.command_address == DGUS_KEY_COOL_SCREEN:
+                if message.command_data[0] == 1:
+                    self.run_delayed_gcode("M104 S0")
+                if message.command_data[0] == 2:
+                    self.run_delayed_gcode("M140 S0")                    
+            if message.command_address == DGUS_KEY_AXIS_PAGE_SELECT:
+                if message.command_data[0] == 1:
+                    self._axis_unit = 0.1
+                elif message.command_data[0] == 2:
+                    self._axis_unit = 1.0
+                elif message.command_data[0] == 3:
+                    self._axis_unit = 10
+                elif message.command_data[0] == 4:
+                    self.run_delayed_gcode("G28")
+                elif message.command_data[0] == 5:
+                    self.run_delayed_gcode("G28 X")
+                elif message.command_data[0] == 6:
+                    self.run_delayed_gcode("G28 Y")
+                elif message.command_data[0] == 7:                  
+                    self.run_delayed_gcode("G28 Z")
+            if message.command_address == DGUS_KEY_ZAXIS_MOVE_KEY:
+                current_z = move.get_status()["gcode_position"].z
+                if message.command_data[0] == 0x01:
+                    if move.absolute_coord:
+                        self.gcode.run_script(F"G0 Z{(current_z + self._axis_unit)}")
+                    else:
+                        self.gcode.run_script(F"G0 Z+{self._axis_unit}")
+                else:
+                    if move.absolute_coord:
+                        self.gcode.run_script(F"G0 Z{(current_z - self._axis_unit)}")
+                    else:
+                        self.gcode.run_script(F"G0 Z-{self._axis_unit}")
+            if message.command_address == DGUS_KEY_YAXIS_MOVE_KEY:
+                current_y = move.get_status()["gcode_position"].y
+                if message.command_data[0] == 0x01:
+                    if move.absolute_coord:
+                        self.gcode.run_script(F"G0 Y{(current_y + self._axis_unit)}")
+                    else:
+                        self.gcode.run_script(F"G0 Y+{self._axis_unit}")
+                else:
+                    if move.absolute_coord:
+                        self.gcode.run_script(F"G0 Y{(current_y - self._axis_unit)}")
+                    else:
+                        self.gcode.run_script(F"G0 Y-{self._axis_unit}")
+            if message.command_address == DGUS_KEY_XAXIS_MOVE_KEY:
+                current_x = move.get_status()["gcode_position"].x
+                if message.command_data[0] == 0x01:
+                    if move.absolute_coord:
+                        self.gcode.run_script(F"G0 X{(current_x + self._axis_unit)}")
+                    else:
+                        self.gcode.run_script(F"G0 X+{self._axis_unit}")
+                else:
+                    if move.absolute_coord:
+                        self.gcode.run_script(F"G0 X{(current_x - self._axis_unit)}")
+                    else:
+                        self.gcode.run_script(F"G0 X-{self._axis_unit}")
+            if message.command_address == DGUS_KEY_HEATER0_TEMP_ENTER:
+                temp = ((message.command_data[0] & 0xff00) >> 8) | ((message.command_data[0] & 0x00ff) << 8)
+                self.run_delayed_gcode(f"M104 S{temp}")
+                self.send_text("pretemp.nozzletemp.txt=\" {} / {}\"")
+            if message.command_address == DGUS_KEY_HOTBED_TEMP_ENTER:
+                temp = ((message.command_data[0] & 0xff00) >> 8) | ((message.command_data[0] & 0x00ff) << 8)
+                self.run_delayed_gcode(f"M140 S{temp}")
+                self.send_text("pretemp.bedtemp.txt=\" {} / {}\"")
+            if(message.command_address == DGUS_KEY_MAIN_PAGE):
+                if(message.command_data[0] == 0x1):
+                    self.send_text("page printpause")          
+            if message.command_address == DGUS_KEY_ADJUSTMENT:
+                if message.command_data[0] == 0x02:
+                    self.send_text("page printpause")
+            if message.command_address == DGUS_KEY_SETTING_SCREEN:
+                if message.command_data[0] == 0x1:
+                    self.run_delayed_gcode("G28\ng1 f200 Z0.05")                    
+                    self.send_text("page leveldata_36")
+                    self.send_text("leveling_36.tm0.en=0")
+                    
+
+    def run_delayed_gcode(self, gcode):
+        self._gcode_event_script = gcode
+        self.reactor.register_timer(self.gcode_command_timer, self.reactor.monotonic())
+        
+    def gcode_command_timer(self, eventtime):
+        self.gcode.run_script(self._gcode_event_script)
+        self._gcode_event_script = ''
+        return self.reactor.NEVER
         
     def _process_input_buffer(self):
         delimiterpos = self.input_buffer.rfind("\n")
@@ -257,6 +390,10 @@ class PrinterSerialBridge:
 
         pled = self.printer.lookup_object("led")
         self.leds =  [pled.led_helpers.get(n) for n in pled.led_helpers.keys() ]
+
+
+        for n in self.printer.lookup_objects():
+            self.log(f"object: {n}" )
         
 
     def log(self, msg, *args, **kwargs):
