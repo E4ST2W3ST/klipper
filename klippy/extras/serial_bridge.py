@@ -7,38 +7,59 @@ import logging, re
 
 QUERY_TIME = 0.2
 
-class PrinterSerialBridge:
+class SerialBridge:
     def __init__(self, config):
-        self.callbacks = []       
-        self.printer = config.get_printer()
-        self.name = config.get_name()
-        self.eol = config.get('eol', default='\n')
-        self._ready = False
-
-        self.reactor = self.printer.get_reactor()
+        self.mcus = []
+        self.configs = []
+        self.printer = config.get_printer()        
+        self.gcode = self.printer.lookup_object("gcode")
+        self.gcode.register_command("SERIAL_BRIDGE_SEND", self.cmd_SERIAL_BRIDGE_SEND, desc="Send a message to a uart bridge")
+        self.gcode.register_command("SERIAL_BRIDGE_LIST_CONFIGS", self.cmd_SERIAL_BRIDGE_LIST_CONFIGS, desc="List Available serial configs")
+        self.gcode.register_command("SERIAL_BRIDGE_LIST_BRIDGES", self.cmd_SERIAL_BRIDGE_LIST_BRIDGES, desc="List current bridges")
         self.printer.register_event_handler("klippy:ready", self.handle_ready)
         self.printer.register_event_handler("klippy:disconnect", self.handle_disconnect)
+        self.bridges = {}
 
-        self.gcode = self.printer.lookup_object("gcode")
-        self.gcode.register_command("SERIAL_BRIDGE_SEND", self.cmd_SERIAL_BRIDGE_SEND)
+    def handle_ready(self):
+        self._ready = True
 
-        self.gcode = self.printer.lookup_object("gcode")
-        self.gcode.register_command("SERIAL_BRIDGE_STATS", self.cmd_SERIAL_BRIDGE_STATS)
+        self.mcus = self.printer.lookup_objects('mcu')
 
-        ppins = self.printer.lookup_object("pins")
-        pin_params = ppins.lookup_pin(config.get("tx_pin"))
-        rx_pin_params = ppins.lookup_pin(config.get("rx_pin"))
-        self.mcu = pin_params['chip']
-        self.oid = self.mcu.create_oid()
-        self.mcu.register_config_callback(self.build_config)
+        self.configs = []
+        for n, mcu in self.mcus:
+            constants = mcu.get_constants()
+            configs= ([f"{v}={k}" for k,v in constants.items() if k.startswith("SERIAL_BRIDGE_CONFIG")])
+            self.configs.extend(configs)
+            logging.info(f"Serial bridge: available configs for {n}: " + ", ".join(configs))
 
-        self.input_buffer = ""
+    def handle_disconnect(self):
+        pass
 
-    def register_callback(self, callback):
-        self.callbacks.append(callback)    
+    def setup_bridge(self, bridge):
+        self.bridges[bridge.name.split()[-1]] = bridge    
 
+    def cmd_SERIAL_BRIDGE_LIST_CONFIGS(self, gcmd):
+        gcmd.respond_info((", ".join(self.configs)))
+
+    def cmd_SERIAL_BRIDGE_LIST_BRIDGES(self, gcmd):
+        gcmd.respond_info((", ".join(self.bridges.keys())))
+        
     def cmd_SERIAL_BRIDGE_SEND(self, gcmd):
-        self.send_serial(self.perform_replacement(gcmd.get("TEXT")))
+        text = gcmd.get("TEXT")
+        bridge = gcmd.get("BRIDGE")
+
+        if not bridge:
+            gcmd.respond_info("BRIDGE is required")
+            return
+        
+        if bridge not in self.bridges:
+            gcmd.respond_info("BRIDGE not found")
+            return
+
+        self.bridges[bridge].send_serial(self.perform_replacement(gcmd.get("TEXT")))
+
+    def get_configs(self):
+        return self.configs
 
     def perform_replacement(self, input_string):
         # Find all occurrences of "\x" followed by two hexadecimal digits
@@ -58,8 +79,34 @@ class PrinterSerialBridge:
         
         return replaced_bytes
 
-    def cmd_SERIAL_BRIDGE_STATS(self, gcmd):
-        self.serial_bridge_stats_cmd.send()
+class PrinterSerialBridge:
+    def __init__(self, config):
+        self.callbacks = []             
+        self.printer = config.get_printer()
+        self.name = config.get_name().split()[-1]
+        self.eol = config.get('eol', default='\n')
+        self._ready = False
+        self.baud = config.getint("baud", 115200)
+        self.serial_config = config.getint("config", 4)
+
+        self.reactor = self.printer.get_reactor()
+        self.printer.register_event_handler("klippy:ready", self.handle_ready)
+        self.printer.register_event_handler("klippy:disconnect", self.handle_disconnect)
+        
+        ppins = self.printer.lookup_object("pins")
+        pin_params = ppins.lookup_pin(config.get("tx_pin"))
+        rx_pin_params = ppins.lookup_pin(config.get("rx_pin"))
+        self.mcu = pin_params['chip']
+        self.oid = self.mcu.create_oid()
+        self.mcu.register_config_callback(self.build_config)
+
+        self.input_buffer = ""
+
+        self.serial_bridge = self.printer.load_object(config, "serial_bridge")
+        self.serial_bridge.setup_bridge(self)
+
+    def register_callback(self, callback):
+        self.callbacks.append(callback)        
 
     def chunkstring(self, msg, length):
         return (msg[0+i:length+i] for i in range(0, len(msg), length))
@@ -72,7 +119,7 @@ class PrinterSerialBridge:
             self.log("Can't send message in a disconnected state")
             return
 
-        chunks = self.chunkstring(msg + self.perform_replacement(self.eol), 40)
+        chunks = self.chunkstring(msg + self.serial_bridge.perform_replacement(self.eol), 40)
         for chunk in chunks:
             byte_debug = ' '.join(['0x{:02x}'.format(byte) for byte in chunk])
             self.log("Sending message: " + byte_debug)
@@ -81,7 +128,7 @@ class PrinterSerialBridge:
     def build_config(self):
         rest_ticks = self.mcu.seconds_to_clock(QUERY_TIME)
         clock = self.mcu.get_query_slot(self.oid)
-        self.mcu.add_config_cmd("command_config_serial_bridge oid=%d clock=%d rest_ticks=%d config=%d baud=%u" % (self.oid, clock, rest_ticks, 4, 115200))
+        self.mcu.add_config_cmd("command_config_serial_bridge oid=%d clock=%d rest_ticks=%d config=%d baud=%d" % (self.oid, clock, rest_ticks, self.serial_config, self.baud))
 
         cmd_queue = self.mcu.alloc_command_queue()
 
@@ -104,7 +151,10 @@ class PrinterSerialBridge:
         self._ready = False    
 
     def log(self, msg, *args, **kwargs):
-        logging.info("SERIAL BRIDGE: " + str(msg))
+        logging.info(f"SERIAL BRIDGE {self.name}: " + str(msg))
+
+def load_config(config):
+    return SerialBridge(config)
 
 def load_config_prefix(config):
     return PrinterSerialBridge(config)
