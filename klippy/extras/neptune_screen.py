@@ -32,6 +32,7 @@ class NeptuneScreen:
         self._requested_file = None
         self._file_page_number = 0
         self._file_per_page = 8
+        self._version = 100
         self.printer = config.get_printer()
         self.config = config
         self.mutex = self.printer.get_reactor().mutex()
@@ -41,6 +42,7 @@ class NeptuneScreen:
         self.heaters = []
         self.leds = []
         self._last_gcode_output = ""
+        
 
         self.printer.register_event_handler("klippy:ready", self.handle_ready)       
         self.gcode = self.printer.lookup_object('gcode')
@@ -76,7 +78,8 @@ class NeptuneScreen:
 
         g_status = self.printer.lookup_object("gcode_move").get_status()    
 
-        self.send_text(f"printpause.zvalue.val={(g_status['position'].z * 10):.0f}")
+        self.updateNumericVariable("printpause.zvalue.vvs1", "2")
+        self.send_text(f"printpause.zvalue.val={(g_status['position'].z * 100):.0f}")
         
         fan = self.printer.lookup_object("fan")
         self.send_text(f"printpause.fanspeed.txt=\"{(fan.get_status(eventtime)['speed'] * 100):.0f}%\"")
@@ -355,21 +358,22 @@ class MainPageProcessor(CommandProcessor):
                 screen.send_text("page printpause")
             else:
                 screen._file_page_number = 0
-                screen.send_text("page printfiles")
 
-                screen.update_file_list()
+                if screen._version >= 142:
+                    screen.send_text("page printfiles")
+                    screen.update_file_list()
+                else:
+                    screen.send_text("page file1")
 
-                #screen.send_text("page file1")
-
-                #limit = 25
-                #screen._file_list = sd.get_file_list()            
-                #index = 0
-                #for fname, fsize in screen._file_list:
-                #    if(index <= limit):
-                #        screen.log(F"Sending file {fname}")
-                #        page = ((index // 5) + 1)
-                #        screen.updateTextVariable(f"file{page}.t{index}.txt", fname)
-                #        index+=1
+                    limit = 25
+                    screen._file_list = sd.get_file_list()            
+                    index = 0
+                    for fname, fsize in screen._file_list:
+                        if(index <= limit):
+                            screen.log(F"Sending file {fname}")
+                            page = ((index // 5) + 1)
+                            screen.updateTextVariable(f"file{page}.t{index}.txt", fname)
+                            index+=1
 
 
 class BedLevelProcessor(CommandProcessor):
@@ -411,7 +415,7 @@ class BedLevelProcessor(CommandProcessor):
                 else:
                     screen.run_delayed_gcode(f"SET_LED LED={n} WHITE=1")    
         if message.command_data[0] == 0x9: #bed level calibrate
-            screen.run_delayed_gcode("M140 S60\nM104 S140\nM109 S140\nM190 S60\nBED_MESH_CALIBRATE SAMPLES=2\nG28\nG1 F200 Z0", lambda: (
+            screen.run_delayed_gcode("BED_MESH_CLEAR\nM140 S60\nM104 S140\nM109 S140\nM190 S60\nBED_MESH_CALIBRATE LIFT_SPEED=2\nG28\nG1 F200 Z0", lambda: (
                 screen.send_text("page leveldata_36"),
                 screen.send_text("page warn_zoffset")
             ))
@@ -833,12 +837,14 @@ class SettingBackProcessor(CommandProcessor):
         if message.command_data[0] == 0x01: #setting back key from leveling
             screen.run_delayed_gcode("Z_OFFSET_APPLY_PROBE\nG0 Z.2", lambda:(
                 self.restart_if_config_needed(screen)
-            ))            
+            ))       
+        if message.command_data[0] == 0x7: #lcd version
+            screen._version = message.command_data[1]
 
 class PrintFileProcessor(CommandProcessor):
     def process(self, message, screen): 
         if message.command_data[0] == 0x01: #confirm print
-            screen.run_delayed_gcode(f"M23 {screen._requested_file}\nM24")
+            screen.run_delayed_gcode(f"SDCARD_PRINT_FILE FILENAME=\"{screen._requested_file}\"")
         if message.command_data[0] == 0x0B: #printfiles prev/next
             if message.command_data[1] == 0x0: #previous
                 screen._file_page_number -= 1                
@@ -931,7 +937,7 @@ class Heater1LoadEnterProcessor(CommandProcessor):
 
 class PrintConfirmProcessor(CommandProcessor):
     def process(self, message, screen):  
-        screen.run_delayed_gcode(f"M23 {screen._requested_file}\nM24")
+        screen.run_delayed_gcode(f"SDCARD_PRINT_FILE FILENAME=\"{screen._requested_file}\"")
 
 CommandProcessors = [
     MainPageProcessor(DGUS_KEY_MAIN_PAGE),
