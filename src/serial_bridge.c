@@ -17,6 +17,8 @@
 
 struct serial_bridge {
     struct timer timer;
+    uint8_t config;    
+    uint32_t baud;
     uint32_t rest_time;
 };
 
@@ -41,23 +43,27 @@ command_config_serial_bridge(uint32_t *args)
     bridge->timer.func = serial_bridge_event;
     bridge->timer.waketime = args[1];
     bridge->rest_time = args[2];
+    bridge->config = args[3];
+    bridge->baud = args[4];
 
+    serial_bridge_configure(&bridge->config, &bridge->baud);
     sched_add_timer(&bridge->timer);
 }
 DECL_COMMAND(command_config_serial_bridge,
-             "command_config_serial_bridge oid=%c clock=%u rest_ticks=%u");
+             "command_config_serial_bridge oid=%c clock=%u rest_ticks=%u config=%c baud=%u");
 
 void
 command_serial_bridge_send(uint32_t *args)
 {
     uint8_t data_len = args[1];
     uint8_t *data = command_decode_ptr(args[2]);
+    uint8_t config = args[3];
 
     //output("sb %u", args[1]);
 
-    serial_bridge_send(data, data_len);
+    serial_bridge_send(data, data_len, config);
 }
-DECL_COMMAND(command_serial_bridge_send, "serial_bridge_send oid=%c text=%*s");
+DECL_COMMAND(command_serial_bridge_send, "serial_bridge_send oid=%c text=%*s config=%c");
 
 void
 command_serial_bridge_stats(uint32_t *args)
@@ -74,11 +80,11 @@ serial_bridge_task(void)
 
     static uint8_t buf[SERIAL_BRIDGE_RX_BUFFER_SIZE];
 
-    uint32_t data_len = serial_bridge_get_data(buf);
+    uint32_t data_len = serial_bridge_get_data(buf, 2);
     //uint8_t data_len2 = data_len;
     if (data_len) {
         //output("dl %u %s", data_len, buf);
-        sendf("serial_bridge_response text=%*s", (uint8_t)data_len, buf);
+        sendf("serial_bridge_response text=%*s usart_index=%c", (uint8_t)data_len, buf, 2);
     }
 }
 DECL_TASK(serial_bridge_task);

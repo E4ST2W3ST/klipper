@@ -13,69 +13,70 @@
 #include "command.h" // DECL_CONSTANT
 #include "sched.h" // sched_wake_tasks
 #include "serial_bridge_irq.h" // serial_enable_tx_irq
+#include "board/serial_bridge.h" //SERIAL_BRIDGE_COUNT
 
-static uint8_t receive_bridge_buf[SERIAL_BRIDGE_RX_BUFFER_SIZE], receive_bridge_pos;
-static uint8_t transmit_bridge_buf[SERIAL_BRIDGE_RX_BUFFER_SIZE], transmit_bridge_pos, transmit_bridge_max;
+static uint8_t receive_bridge_buf[SERIAL_BRIDGE_RX_BUFFER_SIZE][SERIAL_BRIDGE_COUNT], receive_bridge_pos[SERIAL_BRIDGE_COUNT];
+static uint8_t transmit_bridge_buf[SERIAL_BRIDGE_RX_BUFFER_SIZE][SERIAL_BRIDGE_COUNT], transmit_bridge_pos[SERIAL_BRIDGE_COUNT], transmit_bridge_max[SERIAL_BRIDGE_COUNT];
 
-void serial_bridge_rx_byte(uint_fast8_t data) {
-    if (receive_bridge_pos >= SERIAL_BRIDGE_RX_BUFFER_SIZE)
+void serial_bridge_rx_byte(uint_fast8_t data, uint8_t usart_index) {
+    if (receive_bridge_pos[usart_index] >= SERIAL_BRIDGE_RX_BUFFER_SIZE)
         // Serial overflow - ignore
         return;
     sched_wake_tasks();
-    receive_bridge_buf[receive_bridge_pos++] = data;
+    receive_bridge_buf[receive_bridge_pos[usart_index]++][usart_index] = data;
 }
 
-int serial_bridge_get_tx_byte(uint8_t *pdata) {
-    if (transmit_bridge_pos >= transmit_bridge_max)
+int serial_bridge_get_tx_byte(uint8_t *pdata, uint8_t usart_index) {
+    if (transmit_bridge_pos[usart_index] >= transmit_bridge_max[usart_index])
         return -1;
-    *pdata = transmit_bridge_buf[transmit_bridge_pos++];
+    *pdata = transmit_bridge_buf[usart_index][transmit_bridge_pos[usart_index]++];
     return 0;
 }
 
 void
-serial_bridge_send(uint8_t* data, uint_fast8_t size)
+serial_bridge_send(uint8_t* data, uint_fast8_t size, uint8_t usart_index)
 {
     // Verify space for message
-    uint_fast8_t tpos = readb(&transmit_bridge_pos), tmax = readb(&transmit_bridge_max);
+    uint_fast8_t tpos = readb(&transmit_bridge_pos[usart_index]), tmax = readb(&transmit_bridge_max[usart_index]);
     if (tpos >= tmax) {
         tpos = tmax = 0;
-        writeb(&transmit_bridge_max, 0);
-        writeb(&transmit_bridge_pos, 0);
+        writeb(&transmit_bridge_max[usart_index], 0);
+        writeb(&transmit_bridge_pos[usart_index], 0);
     }
 
-    if (tmax + size > sizeof(transmit_bridge_buf)) {
-        if (tmax + size - tpos > sizeof(transmit_bridge_buf))
+    if (tmax + size > sizeof(transmit_bridge_buf[usart_index])) {
+        if (tmax + size - tpos > sizeof(transmit_bridge_buf[usart_index]))
             // Not enough space for message
             return;
-        // Disable TX irq and move buffer
-        writeb(&transmit_bridge_max, 0);
-        tpos = readb(&transmit_bridge_pos);
+        // Disable TX irq and move usart_index
+        writeb(&transmit_bridge_max[usart_index], 0);
+        tpos = readb(&transmit_bridge_pos[usart_index]);
         tmax -= tpos;
-        memmove(&transmit_bridge_buf[0], &transmit_bridge_buf[tpos], tmax);
-        writeb(&transmit_bridge_pos, 0);
-        writeb(&transmit_bridge_max, tmax);
-        serial_bridge_enable_tx_irq();
+        memmove(&transmit_bridge_buf[usart_index][0], &transmit_bridge_buf[usart_index][tpos], tmax);
+        writeb(&transmit_bridge_pos[usart_index], 0);
+        writeb(&transmit_bridge_max[usart_index], tmax);
+        serial_bridge_enable_tx_irq(usart_index);
     }
 
     // Generate message
-    uint8_t *buf = &transmit_bridge_buf[tmax];
+    uint8_t *buf = &transmit_bridge_buf[usart_index][tmax];
     memcpy(buf, data, size);
 
     // Start message transmit
-    writeb(&transmit_bridge_max, tmax + size);
-    serial_bridge_enable_tx_irq();
+    writeb(&transmit_bridge_max[usart_index], tmax + size);
+    serial_bridge_enable_tx_irq(usart_index);
 }
 
 // Remove from the receive buffer the given number of bytes
 uint8_t
-serial_bridge_get_data(uint8_t* data)
+serial_bridge_get_data(uint8_t* data, uint8_t usart_index)
 {
     for (;;) {
-        uint_fast8_t rpos = readb(&receive_bridge_pos);
+        uint_fast8_t rpos = readb(&receive_bridge_pos[usart_index]);
         if (!rpos)
             return 0;
 
-        uint8_t *buf = receive_bridge_buf;
+        uint8_t *buf = receive_bridge_buf[usart_index];
         memcpy(data, buf, rpos);
         irqstatus_t flag = irq_save();
         if (rpos != readb(&receive_bridge_pos)) {
@@ -83,7 +84,7 @@ serial_bridge_get_data(uint8_t* data)
             irq_restore(flag);
             continue;
         }
-        receive_bridge_pos = 0;
+        receive_bridge_pos[usart_index] = 0;
         irq_restore(flag);
 
         return rpos;
