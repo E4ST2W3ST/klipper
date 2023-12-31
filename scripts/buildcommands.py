@@ -286,7 +286,6 @@ class HandleCommandGeneration:
         mlist = list(self.commands.keys()) + [m for n, m in self.encoders]
         for msgname in mlist:
             msg = self.messages_by_name.get(msgname, msgname)
-            print(msg)
             if msg not in self.msg_to_id:
                 msgid += 1
                 self.msg_to_id[msg] = msgid

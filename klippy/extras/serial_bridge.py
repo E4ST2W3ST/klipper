@@ -88,6 +88,7 @@ class PrinterSerialBridge:
         self._ready = False
         self.baud = config.getint("baud", 115200)
         self.serial_config = config.getint("config", 4)
+        self._logging = config.getboolean("logging", False)
 
         self.reactor = self.printer.get_reactor()
         self.printer.register_event_handler("klippy:ready", self.handle_ready)
@@ -116,7 +117,7 @@ class PrinterSerialBridge:
 
     def send_serial(self, msg):
         if not self._ready:
-            self.log("Can't send message in a disconnected state")
+            self.warn("Can't send message in a disconnected state")
             return
 
         chunks = self.chunkstring(msg + self.serial_bridge.perform_replacement(self.eol), 40)
@@ -151,7 +152,11 @@ class PrinterSerialBridge:
         self._ready = False    
 
     def log(self, msg, *args, **kwargs):
-        logging.info(f"SERIAL BRIDGE {self.name}: " + str(msg))
+        if self.logging:
+            logging.info(f"SERIAL BRIDGE {self.name}: " + str(msg))
+
+    def warn(self, msg, *args, **kwargs):
+        logging.warning(f"SERIAL BRIDGE {self.name}: " + str(msg))
 
 def load_config(config):
     return SerialBridge(config)

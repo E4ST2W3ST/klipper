@@ -19,6 +19,8 @@ class NeptuneScreen:
         self._serial_state = SERIAL_STATE_HEADER_NONE
         self._axis_unit = 1
         self._temp_and_rate_unit = 1
+        self._filament_load_length = 50
+        self._filament_load_feedrate = 150
         self._acceleration_unit = 100
         self._speed_ctrl = 'feedrate'
         self._temp_ctrl = 'extruder'
@@ -28,11 +30,14 @@ class NeptuneScreen:
         self._gcode_callbacks = {}
         self._file_list = []
         self._requested_file = None
+        self._file_page_number = 0
+        self._file_per_page = 8
         self.printer = config.get_printer()
         self.config = config
         self.mutex = self.printer.get_reactor().mutex()
         self.name = config.get_name()
         self.reactor = self.printer.get_reactor()        
+        self._logging = config.getboolean("logging", False)
         self.heaters = []
         self.leds = []
 
@@ -54,7 +59,7 @@ class NeptuneScreen:
 
         for heater in self.heaters:            
             current_temp, target_temp = heater.get_temp(eventtime)            
-            if(heater.name == 'heater_bed'):
+            if heater.name == 'heater_bed':
                 self.send_text("main.bedtemp.txt=\"" f'{current_temp:.0f} / {target_temp:.0f}' + "\"")
             else:
                 self.send_text("main.nozzletemp.txt=\"" f'{current_temp:.0f} / {target_temp:.0f}' + "\"")
@@ -86,7 +91,7 @@ class NeptuneScreen:
             status = led.get_status(eventtime)
             white = status["color_data"][0][3]
             
-            if(white > 0):
+            if white > 0:
                 return True
             else:
                 return False
@@ -118,7 +123,7 @@ class NeptuneScreen:
             elif self._serial_state == SERIAL_STATE_HEADER_MESSAGE:                
                 message.payload.append(byte)
 
-                if(len(message.payload) == message.length):
+                if len(message.payload) == message.length:
                     messages.append(message)
                     message = None
                     self._last_message = None
@@ -134,7 +139,7 @@ class NeptuneScreen:
         move = self.printer.lookup_object("gcode_move")
         extrusion_factor = move.extrude_factor
 
-        if(message.command == DGUS_CMD_READVAR):
+        if message.command == DGUS_CMD_READVAR:
             for Processor in CommandProcessors:
                 Processor.process_if_match(message, self)
 
@@ -157,7 +162,7 @@ class NeptuneScreen:
                         callback()
                 except Exception as e:
                     self.send_text("beep 2000")
-                    self.log("Error running gcode script: " + str(e))
+                    self.error("Error running gcode script: " + str(e))
 
                 self.log("Running delayed complete: " + code)
                 
@@ -202,7 +207,29 @@ class NeptuneScreen:
         stats = self.printer.lookup_object("print_stats").get_status(self.reactor.monotonic())
         sd = self.printer.lookup_object("virtual_sdcard").get_status(self.reactor.monotonic())
 
-        return (stats['print_duration'] / sd['progress']) if sd['progress'] > 0 else 0
+        if sd:
+            return (stats['print_duration'] / sd['progress']) if sd['progress'] > 0 else 0
+        else:
+            return stats['print_duration']
+
+    def update_file_list(self):
+        sd = self.printer.lookup_object("virtual_sdcard")
+
+        if sd:
+            self._file_list = sd.get_file_list()            
+            index = 0
+
+            current_file_index = self._file_page_number * self._file_per_page
+            next_file_index = current_file_index + self._file_per_page
+
+            for i in range(8):
+                self.updateTextVariable(f"printfiles.t{i}.txt", "")
+
+            for fname, fsize in self._file_list:
+                if index >= current_file_index and index < next_file_index:
+                    self.log(F"Sending file {fname}")
+                    self.updateTextVariable(f"printfiles.t{(index % self._file_per_page)}.txt", fname)
+                index+=1
 
     def handle_ready(self):
         self.log("Ready")
@@ -224,7 +251,11 @@ class NeptuneScreen:
         self.serial_bridge.send_text(text)
 
     def log(self, msg, *args, **kwargs):
-        logging.info("Neptune Screen: " + str(msg))
+        if self.logging:
+            logging.info("Neptune Screen: " + str(msg))
+
+    def error(self, msg, *args, **kwargs):
+        logging.error("Neptune Screen: " + str(msg))
 
     def _reset_screen(self, eventtime):
         self.log("Reset")
@@ -275,10 +306,15 @@ DGUS_KEY_AXIS_PAGE_SELECT = 0x1046
 DGUS_KEY_XAXIS_MOVE_KEY = 0x1048
 DGUS_KEY_YAXIS_MOVE_KEY = 0x104A
 DGUS_KEY_ZAXIS_MOVE_KEY = 0x104C
-DGUS_KEY_HARDWARE_TEST = 0x2202
+DGUS_KEY_HEATER0_LOAD_ENTER = 0x1054
+DGUS_KEY_FILAMENT_LOAD = 0x1056
+DGUS_KEY_HEATER1_LOAD_ENTER = 0x1058
+DGUS_KEY_POWER_CONTINUE = 0x105f
 DGUS_KEY_PRINT_FILE = 0x2198
 DGUS_KEY_SELECT_FILE = 0x2199
-DGUS_KEY_POWER_CONTINUE = 0x105f
+DGUS_KEY_HARDWARE_TEST = 0x2202
+DGUS_KEY_PRINT_FILES = 0x2204
+DGUS_KEY_PRINT_CONFIRM = 0x2205
 
 class CommandProcessor(ABC):
     def __init__(self, address, command=None):
@@ -306,18 +342,23 @@ class MainPageProcessor(CommandProcessor):
             if status['state'] in ['printing', 'paused']:
                 screen.send_text("page printpause")
             else:
-                screen.send_text("page file1")
+                screen._file_page_number = 0
+                screen.send_text("page printfiles")
 
-                limit = 25
-                screen._file_list = sd.get_file_list()            
-                index = 0
-                for fname, fsize in screen._file_list:
-                    if(index <= limit):
-                        screen.log(F"Sending file {fname}")
-                        page = ((index // 5) + 1)
-                        screen.updateTextVariable(f"file{page}.t{index}.txt", fname)
-                        index+=1
-            #screen.send_text("page printpause")
+                screen.update_file_list()
+
+                #screen.send_text("page file1")
+
+                #limit = 25
+                #screen._file_list = sd.get_file_list()            
+                #index = 0
+                #for fname, fsize in screen._file_list:
+                #    if(index <= limit):
+                #        screen.log(F"Sending file {fname}")
+                #        page = ((index // 5) + 1)
+                #        screen.updateTextVariable(f"file{page}.t{index}.txt", fname)
+                #        index+=1
+
 
 class BedLevelProcessor(CommandProcessor):
     def process(self, message, screen):
@@ -353,7 +394,7 @@ class BedLevelProcessor(CommandProcessor):
                 status = pled.led_helpers[n].get_status(None)
                 white = status["color_data"][0][3]
                 
-                if(white > 0):
+                if white > 0:
                     screen.run_delayed_gcode(f"SET_LED LED={n} WHITE=0")
                 else:
                     screen.run_delayed_gcode(f"SET_LED LED={n} WHITE=1")    
@@ -370,9 +411,14 @@ class BedLevelProcessor(CommandProcessor):
 
             estimated_time_left = screen.get_estimated_print_time()
 
-            screen.updateTextVariable("printpause.t0.txt", f"{stats['filename']}")
-            screen.updateNumericVariable("printpause.printprocess.val", f"{(sd['progress'] * 100):.0f}")
-            screen.updateTextVariable("printpause.printvalue.txt", f"{(sd['progress'] * 100):.0f}")
+            if sd:
+                screen.updateNumericVariable("printpause.printprocess.val", f"{(sd['progress'] * 100):.0f}")
+                screen.updateTextVariable("printpause.printvalue.txt", f"{(sd['progress'] * 100):.0f}")
+            else:
+                screen.updateNumericVariable("printpause.printprocess.val", f"{(0 * 100):.0f}")
+                screen.updateTextVariable("printpause.printvalue.txt", f"{(0* 100):.0f}")
+
+            screen.updateTextVariable("printpause.t0.txt", f"{stats['filename']}")            
             screen.updateTextVariable("printpause.printtime.txt", f"{(stats['print_duration'] / 60.0):.0f} / {(estimated_time_left / 60):.0f} min")
             
             screen.updateTextVariable("printpause.fanspeed.txt", f"{(fan.get_status(screen.reactor.monotonic())['speed'] * 100):.0f}%")
@@ -387,8 +433,12 @@ class BedLevelProcessor(CommandProcessor):
             screen.updateTextVariable("printpause.printspeed.txt", f"{(move['speed_factor'] * 100):.0f}")
             screen.updateTextVariable("printpause.printtime.txt", f"{(stats['print_duration'] / 60.0):.0f} / {(estimated_time_left / 60):.0f} min")
 
-            screen.updateNumericVariable("printpause.printprocess.val", f"{(sd['progress'] * 100):.0f}")
-            screen.updateTextVariable("printpause.printvalue.txt", f"{(sd['progress'] * 100):.0f}")
+            if sd:
+                screen.updateNumericVariable("printpause.printprocess.val", f"{(sd['progress'] * 100):.0f}")
+                screen.updateTextVariable("printpause.printvalue.txt", f"{(sd['progress'] * 100):.0f}")
+            else:
+                screen.updateNumericVariable("printpause.printprocess.val", f"{(0 * 100):.0f}")
+                screen.updateTextVariable("printpause.printvalue.txt", f"{(0* 100):.0f}")
             
             #restFlag1: 0 - printing, 1- paused
             #restFlag2: m76 pauses print timer setting this to 0 and restflag to 1, 1 --abort sd, 1 when hotend temp reached
@@ -479,7 +529,7 @@ class TempScreenProcessor(CommandProcessor):
                 max_temp = 125
 
             new_target_temp = target_temp + screen._temp_and_rate_unit * (1 if message.command_data[0] == 0x8 else - 1)
-            if(new_target_temp >= min_temp and new_target_temp <= max_temp):
+            if new_target_temp >= min_temp and new_target_temp <= max_temp:
                 gcode = ('M104' if screen._temp_ctrl == 'extruder' else 'M140')
                 screen.run_delayed_gcode(F"{gcode} S{new_target_temp}")
                 screen.updateNumericVariable("adjusttemp.targettemp.val", f'{new_target_temp:.0f}')
@@ -502,7 +552,7 @@ class TempScreenProcessor(CommandProcessor):
             if message.command_data[0] == 0xE: #increase
                 unit *= -1
 
-            if(screen._speed_ctrl == 'feedrate'):
+            if screen._speed_ctrl == 'feedrate':
                 move = screen.printer.lookup_object("gcode_move").get_status(screen.reactor.monotonic())
                             
                 new_rate = (move['speed_factor'] + (unit / 100.0)) * 100
@@ -513,7 +563,7 @@ class TempScreenProcessor(CommandProcessor):
 
                 screen.run_delayed_gcode(f"M220 S{new_rate:.0f}")
                 screen.updateNumericVariable("adjustspeed.targetspeed.val", f"{(new_rate):.0f}")  
-            if(screen._speed_ctrl == 'flowrate'):
+            if screen._speed_ctrl == 'flowrate':
                 move = screen.printer.lookup_object("gcode_move").get_status(screen.reactor.monotonic())
                 new_rate = (move['extrude_factor'] + (unit / 100.0)) * 100
 
@@ -527,7 +577,7 @@ class TempScreenProcessor(CommandProcessor):
 
                 screen.run_delayed_gcode(f"M221 S{new_rate:.0f}")
                 screen.updateNumericVariable("adjustspeed.targetspeed.val", f"{(new_rate):.0f}")  
-            if(screen._speed_ctrl == 'fanspeed'):
+            if screen._speed_ctrl == 'fanspeed':
                 fan = screen.printer.lookup_object("fan")
                 new_rate = fan.get_status(screen.reactor.monotonic())['speed'] + (unit / 100.0)
 
@@ -715,12 +765,16 @@ class SettingScreenProcessor(CommandProcessor):
             else:
                 screen.run_delayed_gcode(f"M106 S255")
                 screen.updateNumericVariable("set.va0.val", "1")
-        if message.command_data[0] == 0xD:
+        if message.command_data[0] == 0x0A: #load filamnet screen
+            screen.send_text("page prefilament")
+            screen.updateTextVariable("prefilament.filamentlength.txt", f"{screen._filament_load_length}")
+            screen.updateTextVariable("prefilament.filamentspeed.txt", f"{screen._filament_load_feedrate}")
+        if message.command_data[0] == 0xD: #settings page
             screen.send_text("page multiset")
 
 class ResumePrintProcessor(CommandProcessor):
     def process(self, message, screen):
-        if message.command_data[0] == 0x1:
+        if message.command_data[0] == 0x1: #resume
             screen.updateNumericVariable("restFlag1", "0")
             screen.send_text("page wait")    
             screen.run_delayed_gcode("M24", lambda: (
@@ -773,6 +827,20 @@ class PrintFileProcessor(CommandProcessor):
     def process(self, message, screen): 
         if message.command_data[0] == 0x01: #confirm print
             screen.run_delayed_gcode(f"M23 {screen._requested_file}\nM24")
+        if message.command_data[0] == 0x0B: #printfiles prev/next
+            if message.command_data[1] == 0x0: #previous
+                screen._file_page_number -= 1                
+
+                if screen._file_page_number < 0:
+                    screen._file_page_number = 0
+
+                screen.update_file_list()
+
+            if message.command_data[1] == 0x1: #next
+                if (screen._file_page_number + 1) * screen._file_per_page < len(screen._file_list):
+                    screen._file_page_number += 1
+
+                screen.update_file_list()
 
 
 class SelectFileProcessor(CommandProcessor):
@@ -795,7 +863,64 @@ class PowerContinueProcessor(CommandProcessor):
     def process(self, message, screen):  
         if message.command_data[0] == 0x03: #resume printing
             screen.send_text("page multiset")
-        
+
+class PrintFilesProcessor(CommandProcessor):
+    def process(self, message, screen):  
+        screen.updateTextVariable("printcnfirm.t0.txt", "")
+        screen.updateTextVariable("printpause.t0.txt", "")
+
+        max_file = len(screen._file_list) - 1
+        requested_file = screen._file_page_number * screen._file_per_page + message.command_data[0]
+
+        if requested_file > max_file:
+            screen.send_text("beep 2000")
+        else:
+            screen.updateTextVariable("printcnfirm.t0.txt", screen._file_list[requested_file][0])
+            screen.updateTextVariable("printpause.t0.txt", screen._file_list[requested_file][0])
+            screen._requested_file = screen._file_list[requested_file][0]
+
+            screen.updateNumericVariable("printcnfirm.t1.font", 0)
+            screen.updateNumericVariable("printcnfirm.t2.font", 0)
+            screen.updateNumericVariable("printcnfirm.t3.font", 0)
+            screen.updateTextVariable("printcnfirm.t1.txt", "Print this model?")
+            screen.updateTextVariable("printcnfirm.t2.txt", "Confirm")
+            screen.updateTextVariable("printcnfirm.t3.txt", "Cancel")
+
+            screen.send_text("page printcnfirm")   
+
+class FilamentLoadProcessor(CommandProcessor):
+    def process(self, message, screen):  
+        move = screen.printer.lookup_object("gcode_move")
+        current_e = move.get_status()["gcode_position"].e
+
+        if message.command_data[0] == 0x01: #unload
+            if move.absolute_coord:
+                screen.run_delayed_gcode(F"G0 E{(current_e - screen._filament_load_length)} F{screen._filament_load_feedrate}")
+            else:
+                screen.run_delayed_gcode(F"G0 E-{screen._filament_load_length} F{screen._filament_load_feedrate}")
+
+        if message.command_data[0] == 0x02: #load
+            if move.absolute_coord:
+                screen.run_delayed_gcode(F"G0 E{(current_e + screen._filament_load_length)} F{screen._filament_load_feedrate}")
+            else:
+                screen.run_delayed_gcode(F"G0 E+{screen._filament_load_length} F{screen._filament_load_feedrate}")
+
+class Heater0LoadEnterProcessor(CommandProcessor):
+    def process(self, message, screen):  
+        length = (message.command_data[0] & 0xff) << 8 | ((message.command_data[0] >> 8) & 0xff)
+        screen._filament_load_length = length
+        screen.updateTextVariable("prefilament.filamentlength.txt", f"{screen._filament_load_length}")
+
+class Heater1LoadEnterProcessor(CommandProcessor):
+    def process(self, message, screen):  
+        feedrate = (message.command_data[0] & 0xff) << 8 | ((message.command_data[0] >> 8) & 0xff)
+        screen._filament_load_feedrate = feedrate
+        screen.updateTextVariable("prefilament.filamentspeed.txt", f"{screen._filament_load_feedrate}")
+
+class PrintConfirmProcessor(CommandProcessor):
+    def process(self, message, screen):  
+        screen.run_delayed_gcode(f"M23 {screen._requested_file}\nM24")
+
 CommandProcessors = [
     MainPageProcessor(DGUS_KEY_MAIN_PAGE),
     BedLevelProcessor(DGUS_KEY_BED_LEVEL),
@@ -816,5 +941,10 @@ CommandProcessors = [
     SettingBackProcessor(DGUS_KEY_SETTING_BACK_KEY),
     PrintFileProcessor(DGUS_KEY_PRINT_FILE),
     SelectFileProcessor(DGUS_KEY_SELECT_FILE),
-    PowerContinueProcessor(DGUS_KEY_POWER_CONTINUE)
+    PowerContinueProcessor(DGUS_KEY_POWER_CONTINUE),
+    PrintFilesProcessor(DGUS_KEY_PRINT_FILES),
+    FilamentLoadProcessor(DGUS_KEY_FILAMENT_LOAD),
+    Heater0LoadEnterProcessor(DGUS_KEY_HEATER0_LOAD_ENTER),
+    Heater1LoadEnterProcessor(DGUS_KEY_HEATER1_LOAD_ENTER),
+    PrintConfirmProcessor(DGUS_KEY_PRINT_CONFIRM)
 ]
