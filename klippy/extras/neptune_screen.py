@@ -1,4 +1,5 @@
 import logging
+import time
 from abc import ABC, abstractmethod
 
 SERIAL_STATE_HEADER_NONE = 0
@@ -14,7 +15,7 @@ DGUS_CMD_READVAR = 0x83
 
 class NeptuneScreen:
     def __init__(self, config):
-        self.log("Init")
+        self.log("Init")        
         self._serial_state = None
         self._serial_state = SERIAL_STATE_HEADER_NONE
         self._axis_unit = 1
@@ -22,12 +23,13 @@ class NeptuneScreen:
         self._speed_ctrl = 'feedrate'
         self._temp_ctrl = 'extruder'
         self._zoffset_unit = 0.1
+        self._gcode_callbacks = {}
         self.printer = config.get_printer()
+        self.mutex = self.printer.get_reactor().mutex()
         self.name = config.get_name()
         self.reactor = self.printer.get_reactor()
         self.printer.load_object(config, 'heaters')
         self.heater_names = config.getlist("heater", ("extruder", "heater_bed"))
-        self._gcode_event_script = ''
         self.heaters = []
         self.leds = []
 
@@ -136,25 +138,45 @@ class NeptuneScreen:
         extrusion_factor = move.extrude_factor
 
         if(message.command == DGUS_CMD_READVAR):
-            for proccessor in CommandProccessors:
-                proccessor.process_if_match(message, self)
+            for Processor in CommandProcessors:
+                Processor.process_if_match(message, self)
 
-    def run_delayed_gcode(self, gcode):
-        self._gcode_event_script = gcode
+    def run_delayed_gcode(self, gcode, callback=None):
+        self._gcode_callbacks[f'{time.time()}'] = {"gcode": gcode, "callback": callback}
         self.reactor.register_timer(self.gcode_command_timer, self.reactor.monotonic())
         
-    def gcode_command_timer(self, eventtime):
-        self.gcode.run_script(self._gcode_event_script)
-        self._gcode_event_script = ''
-        return self.reactor.NEVER
+    def gcode_command_timer(self, eventtime):    
+        with self.mutex:            
+            for time in list(self._gcode_callbacks.keys()):
+                command = self._gcode_callbacks[time]
+                del self._gcode_callbacks[time]                
+                code = command["gcode"]
+                callback = command["callback"]
+
+                self.log("Running delayed gcode: " + code)
+                self.gcode.run_script(code)
+                if callback:
+                    callback()
+                self.log("Running delayed complete: " + code)
+                
+            return self.reactor.NEVER
 
     def _screen_init(self, eventtime):
         self.log("Screen init")
+        move = self.printer.lookup_object("gcode_move").get_status(self.reactor.monotonic())
+        probe = self.printer.lookup_object("probe")
+
         self.serial_bridge.send_text("page boot") 
         self.serial_bridge.send_text("com_star") 
-        self.serial_bridge.send_text(f"main.va0.val={self._get_variant()}") 
+        self.serial_bridge.send_text(f"main.va0.val={self._get_variant()}")        
         self.serial_bridge.send_text("page main") 
         self.serial_bridge.send_text(f"information.sversion.txt=\"Klipper\"")
+        self.updateNumericVariable("restFlag1", f"1") #paused
+        self.updateNumericVariable("restFlag2", f"1") #allow pause
+        (x,y,z) = probe.get_offsets()
+        homing_z = move['homing_origin'].z
+        self.updateNumericVariable("leveldata.z_offset.val", f"{((homing_z + z) * 100):.0f}")
+
         self.reactor.update_timer(self._update_timer, eventtime + self._update_interval)
         return self.reactor.NEVER
 
@@ -228,6 +250,9 @@ class Message:
         return f'payload: { payload_str }, length: {self.length}, command: 0x{self.command:02x}, command_address: 0x{self.command_address:04x} command_data_length: {self.command_data_length}, command_data: {self.command_data}'
 
 DGUS_KEY_MAIN_PAGE = 0x1002
+DGUS_KEY_STOP_PRINT = 0x1008
+DGUS_KEY_PAUSE_PRINT = 0x100A
+DGUS_KEY_RESUME_PRINT = 0x100C
 DGUS_KEY_ADJUSTMENT = 0x1004
 DGUS_KEY_TEMP_SCREEN = 0x1030
 DGUS_KEY_COOL_SCREEN = 0x1032
@@ -240,7 +265,7 @@ DGUS_KEY_XAXIS_MOVE_KEY = 0x1048
 DGUS_KEY_YAXIS_MOVE_KEY = 0x104A
 DGUS_KEY_ZAXIS_MOVE_KEY = 0x104C
 
-class CommandProccessor(ABC):
+class CommandProcessor(ABC):
     def __init__(self, address, command=None):
         self.address = address
         self.command = command
@@ -257,12 +282,12 @@ class CommandProccessor(ABC):
     def process(self, data, screen):
         pass
         
-class MainPageProccessor(CommandProccessor):
+class MainPageProcessor(CommandProcessor):
     def process(self, message, screen):
         if message.command_data[0] == 0x1: #print button
             screen.send_text("page printpause")
 
-class BedLevelProccessor(CommandProccessor):
+class BedLevelProcessor(CommandProcessor):
     def process(self, message, screen):
         if message.command_data[0] == 0x2 or message.command_data[0] == 0x3: #z-offset up/down
             move = screen.printer.lookup_object("gcode_move").get_status(screen.reactor.monotonic())
@@ -283,10 +308,13 @@ class BedLevelProccessor(CommandProccessor):
             screen.updateNumericVariable("adjustzoffset.z_offset.val", f"{((new_offset + z) * 100):.0f}")        
         if message.command_data[0] == 0x4: #z-offset unit 0.01
             screen._zoffset_unit = 0.01
+            screen.updateNumericVariable("adjustzoffset.zoffset_value.val", f'{1}')
         if message.command_data[0] == 0x5: #z-offset unit 0.1
             screen._zoffset_unit = 0.1
+            screen.updateNumericVariable("adjustzoffset.zoffset_value.val", f'{2}')
         if message.command_data[0] == 0x6: #z-offset unit 1
             screen._zoffset_unit = 1
+            screen.updateNumericVariable("adjustzoffset.zoffset_value.val", f'{3}')
         if message.command_data[0] == 0x8: #light button
             screen.log("Requested light toggle")
             pled = screen.printer.lookup_object("led")
@@ -327,12 +355,18 @@ class BedLevelProccessor(CommandProccessor):
             screen.updateNumericVariable("printpause.printprocess.val", f"{(sd['progress'] * 100):.0f}")
             screen.updateTextVariable("printpause.printvalue.txt", f"{(sd['progress'] * 100):.0f}")
             
+            #restFlag1: 0 - printing, 1- paused
+            #restFlag2: m76 pauses print timer setting this to 0 and restflag to 1, 1 --abort sd, 1 when hotend temp reached
+            #can only pause print when restflag2=1
+            
             if stats['state'] == 'printing':
                 screen.updateNumericVariable("restFlag1", f"0")
             else:
                 screen.updateNumericVariable("restFlag1", f"1")
 
-class AdjustmentProccessor(CommandProccessor):
+            self.updateNumericVariable("restFlag2", f"1") #allow pause
+
+class AdjustmentProcessor(CommandProcessor):
     def process(self, message, screen):    
         if message.command_data[0] == 0x1:
             screen._temp_and_rate_unit = 10
@@ -372,7 +406,7 @@ class AdjustmentProccessor(CommandProccessor):
             screen.run_delayed_gcode("M106 S255")
             screen.updateNumericVariable("adjustspeed.targetspeed.val", f"{(100):.0f}")  
 
-class TempScreenProccessor(CommandProccessor):
+class TempScreenProcessor(CommandProcessor):
     def process(self, message, screen):
         if message.command_data[0] == 0x1: #get hotend temp
             screen._temp_ctrl = 'extruder'
@@ -469,14 +503,14 @@ class TempScreenProccessor(CommandProccessor):
                 screen.updateNumericVariable("adjustspeed.targetspeed.val", f"{(new_rate * 100):.0f}")  
 
     
-class CoolScreenProccessor(CommandProccessor):
+class CoolScreenProcessor(CommandProcessor):
     def process(self, message, screen):
         if message.command_data[0] == 1: #power off hotend
             screen.run_delayed_gcode("M104 S0")
         if message.command_data[0] == 2: #power off bed
             screen.run_delayed_gcode("M140 S0")
 
-class AxisPageSelectProccessor(CommandProccessor):
+class AxisPageSelectProcessor(CommandProcessor):
     def process(self, message, screen):
         if message.command_data[0] == 1:
             screen._axis_unit = 0.1
@@ -485,15 +519,27 @@ class AxisPageSelectProccessor(CommandProccessor):
         elif message.command_data[0] == 3:
             screen._axis_unit = 10
         elif message.command_data[0] == 4:
-            screen.run_delayed_gcode("G28")
+            screen.send_text("page autohome")
+            screen.run_delayed_gcode("G28", lambda:(
+                screen.send_text("page premove")
+            ))
         elif message.command_data[0] == 5:
-            screen.run_delayed_gcode("G28 X")
+            screen.send_text("page autohome")
+            screen.run_delayed_gcode("G28 X", lambda:(
+                screen.send_text("page premove")
+            ))            
         elif message.command_data[0] == 6:
-            screen.run_delayed_gcode("G28 Y")
+            screen.send_text("page autohome")
+            screen.run_delayed_gcode("G28 Y", lambda:(
+                screen.send_text("page premove")
+            ))            
         elif message.command_data[0] == 7:                  
-            screen.run_delayed_gcode("G28 Z")
+            screen.send_text("page autohome")
+            screen.run_delayed_gcode("G28 Z", lambda:(
+                screen.send_text("page premove")
+            ))
 
-class ZAxisMoveKeyProccessor(CommandProccessor):
+class ZAxisMoveKeyProcessor(CommandProcessor):
     def process(self, message, screen):
         move = screen.printer.lookup_object("gcode_move")
         current_z = move.get_status()["gcode_position"].z
@@ -508,7 +554,7 @@ class ZAxisMoveKeyProccessor(CommandProccessor):
             else:
                 screen.run_delayed_gcode(F"G0 Z-{screen._axis_unit}")
 
-class YAxisMoveKeyProccessor(CommandProccessor):
+class YAxisMoveKeyProcessor(CommandProcessor):
     def process(self, message, screen):
         move = screen.printer.lookup_object("gcode_move")
         current_y = move.get_status()["gcode_position"].y
@@ -523,7 +569,7 @@ class YAxisMoveKeyProccessor(CommandProccessor):
             else:
                 screen.run_delayed_gcode(F"G0 Y-{screen._axis_unit}")
 
-class XAxisMoveKeyProccessor(CommandProccessor):
+class XAxisMoveKeyProcessor(CommandProcessor):
     def process(self, message, screen):
         move = screen.printer.lookup_object("gcode_move")
         current_x = move.get_status()["gcode_position"].x
@@ -538,36 +584,75 @@ class XAxisMoveKeyProccessor(CommandProccessor):
             else:
                 screen.run_delayed_gcode(F"G0 X-{screen._axis_unit}")
 
-class Heater0KeyProccessor(CommandProccessor): #heater temp
+class Heater0KeyProcessor(CommandProcessor): #heater temp
     def process(self, message, screen):
         temp = ((message.command_data[0] & 0xff00) >> 8) | ((message.command_data[0] & 0x00ff) << 8)
         screen.run_delayed_gcode(f"M104 S{temp}")
         screen.send_text("pretemp.nozzletemp.txt=\" {} / {}\"")
 
-class HeaterBedKeyProccessor(CommandProccessor): #bed temp
+class HeaterBedKeyProcessor(CommandProcessor): #bed temp
     def process(self, message, screen):
         temp = ((message.command_data[0] & 0xff00) >> 8) | ((message.command_data[0] & 0x00ff) << 8)
         screen.run_delayed_gcode(f"M140 S{temp}")
         screen.send_text("pretemp.bedtemp.txt=\" {} / {}\"")           
 
-class SettingScreenProccessor(CommandProccessor):
+class SettingScreenProcessor(CommandProcessor):
+    def process(self, message, screen):
+        if message.command_data[0] == 0x1:            
+            screen.send_text("page autohome")
+            screen.run_delayed_gcode("G28\ng1 f200 Z0.05", lambda: (
+                screen.updateNumericVariable("leveling.va1.val", f"{screen._get_variant()}"),           
+                screen.send_text("page leveldata_36"),
+                screen.send_text("leveling_36.tm0.en=0")
+            ))   
+
+class ResumePrintProcessor(CommandProcessor):
     def process(self, message, screen):
         if message.command_data[0] == 0x1:
-            screen.run_delayed_gcode("G28\ng1 f200 Z0.05")                    
-            screen.send_text("page leveldata_36")
-            screen.send_text("leveling_36.tm0.en=0")
+            screen.updateNumericVariable("restFlag1", "0")
+            screen.send_text("page wait")    
+            screen.run_delayed_gcode("M24", lambda: (
+                screen.send_text("page printpause")
+            ))
 
-CommandProccessors = [
-    MainPageProccessor(DGUS_KEY_MAIN_PAGE),
-    BedLevelProccessor(DGUS_KEY_BED_LEVEL),
-    TempScreenProccessor(DGUS_KEY_TEMP_SCREEN),
-    CoolScreenProccessor(DGUS_KEY_COOL_SCREEN),
-    AxisPageSelectProccessor(DGUS_KEY_AXIS_PAGE_SELECT),
-    ZAxisMoveKeyProccessor(DGUS_KEY_ZAXIS_MOVE_KEY),
-    YAxisMoveKeyProccessor(DGUS_KEY_YAXIS_MOVE_KEY),
-    XAxisMoveKeyProccessor(DGUS_KEY_XAXIS_MOVE_KEY),
-    Heater0KeyProccessor(DGUS_KEY_HEATER0_TEMP_ENTER),
-    HeaterBedKeyProccessor(DGUS_KEY_HOTBED_TEMP_ENTER),
-    AdjustmentProccessor(DGUS_KEY_ADJUSTMENT),
-    SettingScreenProccessor(DGUS_KEY_SETTING_SCREEN)
+
+class PausePrintProcessor(CommandProcessor):
+    def process(self, message, screen):
+        if message.command_data[0] == 0x1: #pause button pressed
+            screen.send_text("page pauseconfirm")
+        if message.command_data[0] == 0xF0: #cancel
+            pass #do nothing, screen change handled in tft
+        if message.command_data[0] == 0xF1: #pause button confirmed
+            screen.updateNumericVariable("restFlag1", "1")
+            screen.send_text("page wait")    
+            screen.run_delayed_gcode("M25", lambda: (
+                screen.send_text("page printpause")
+            ))
+
+
+class StopPrintProcessor(CommandProcessor):
+    def process(self, message, screen):
+        if message.command_data[0] == 0x1 or message.command_data[0] == 0xF1: #confirm stop print
+            screen.send_text("page wait")    
+            screen.run_delayed_gcode("CANCEL_PRINT", lambda: (
+                screen.send_text("page main")
+            ))
+            
+
+CommandProcessors = [
+    MainPageProcessor(DGUS_KEY_MAIN_PAGE),
+    BedLevelProcessor(DGUS_KEY_BED_LEVEL),
+    TempScreenProcessor(DGUS_KEY_TEMP_SCREEN),
+    CoolScreenProcessor(DGUS_KEY_COOL_SCREEN),
+    AxisPageSelectProcessor(DGUS_KEY_AXIS_PAGE_SELECT),
+    ZAxisMoveKeyProcessor(DGUS_KEY_ZAXIS_MOVE_KEY),
+    YAxisMoveKeyProcessor(DGUS_KEY_YAXIS_MOVE_KEY),
+    XAxisMoveKeyProcessor(DGUS_KEY_XAXIS_MOVE_KEY),
+    Heater0KeyProcessor(DGUS_KEY_HEATER0_TEMP_ENTER),
+    HeaterBedKeyProcessor(DGUS_KEY_HOTBED_TEMP_ENTER),
+    AdjustmentProcessor(DGUS_KEY_ADJUSTMENT),
+    SettingScreenProcessor(DGUS_KEY_SETTING_SCREEN),
+    ResumePrintProcessor(DGUS_KEY_RESUME_PRINT),
+    PausePrintProcessor(DGUS_KEY_PAUSE_PRINT),
+    StopPrintProcessor(DGUS_KEY_STOP_PRINT)
 ]

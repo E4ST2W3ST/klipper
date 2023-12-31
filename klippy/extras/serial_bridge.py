@@ -105,15 +105,6 @@ class PrinterSerialBridge:
     def process_message(self, message):
         self.log("Process message: " + str(message))        
         return self.reactor.NEVER
-        
-    def _process_input_buffer(self):
-        delimiterpos = self.input_buffer.rfind("\n")
-        while delimiterpos > 0:
-            commands = self.input_buffer[:delimiterpos]
-            self.gcode.respond_info(commands, log=False)
-            self.gcode._process_commands(commands.split("\n"))
-            self.input_buffer = self.input_buffer[delimiterpos + 1:]
-            delimiterpos = self.input_buffer.rfind("\n")
 
     def handle_ready(self):
         self.log("ready")        
