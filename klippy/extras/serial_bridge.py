@@ -9,14 +9,15 @@ QUERY_TIME = 0.2
 
 class PrinterSerialBridge:
     def __init__(self, config):
-        self.log("Init") 
         self.callbacks = []       
         self.printer = config.get_printer()
         self.name = config.get_name()
         self.eol = config.get('eol', default='\n')
+        self._ready = False
 
         self.reactor = self.printer.get_reactor()
         self.printer.register_event_handler("klippy:ready", self.handle_ready)
+        self.printer.register_event_handler("klippy:disconnect", self.handle_disconnect)
 
         self.gcode = self.printer.lookup_object("gcode")
         self.gcode.register_command("SERIAL_BRIDGE_SEND", self.cmd_SERIAL_BRIDGE_SEND)
@@ -24,28 +25,19 @@ class PrinterSerialBridge:
         self.gcode = self.printer.lookup_object("gcode")
         self.gcode.register_command("SERIAL_BRIDGE_STATS", self.cmd_SERIAL_BRIDGE_STATS)
 
-        self.gcode.register_output_handler(self._output_callback)
-
         ppins = self.printer.lookup_object("pins")
         pin_params = ppins.lookup_pin(config.get("tx_pin"))
         rx_pin_params = ppins.lookup_pin(config.get("rx_pin"))
         self.mcu = pin_params['chip']
         self.oid = self.mcu.create_oid()
         self.mcu.register_config_callback(self.build_config)
-        self.gcode = self.printer.lookup_object('gcode')
 
         self.input_buffer = ""
 
     def register_callback(self, callback):
-        self.callbacks.append(callback)
-
-    def _output_callback(self, msg):
-        self.log("GCODE OUTPUT: " + msg)
-        self.send_text(msg)
+        self.callbacks.append(callback)    
 
     def cmd_SERIAL_BRIDGE_SEND(self, gcmd):
-        self.log("SERIAL_BRIDGE_SEND: " + gcmd.get("TEXT"))
-        self.log("SERIAL_BRIDGE_SEND: " + bytes(gcmd.get("TEXT"), 'utf-8').hex())
         self.send_serial(self.perform_replacement(gcmd.get("TEXT")))
 
     def perform_replacement(self, input_string):
@@ -68,7 +60,6 @@ class PrinterSerialBridge:
 
     def cmd_SERIAL_BRIDGE_STATS(self, gcmd):
         self.serial_bridge_stats_cmd.send()
-        self.log("SERIAL_BRIDGE_STATS" + gcmd.get("TEXT"))
 
     def chunkstring(self, msg, length):
         return (msg[0+i:length+i] for i in range(0, len(msg), length))
@@ -77,9 +68,14 @@ class PrinterSerialBridge:
         self.send_serial(bytes(msg, encoding='utf-8'))
 
     def send_serial(self, msg):
+        if not self._ready:
+            self.log("Can't send message in a disconnected state")
+            return
+
         chunks = self.chunkstring(msg + self.perform_replacement(self.eol), 40)
         for chunk in chunks:
-            self.log(f"Sending chunk: {chunk.hex()}")
+            byte_debug = ' '.join(['0x{:02x}'.format(byte) for byte in chunk])
+            self.log("Sending message: " + byte_debug)
             self.serial_bridge_send_cmd.send([self.oid, chunk])
 
     def build_config(self):
@@ -96,18 +92,16 @@ class PrinterSerialBridge:
 
     def _handle_serial_bridge_response(self, params):
         data = params["text"]
-        byte_debug = ' '.join(['0x{:02x}'.format(byte) for byte in data])
-        self.log("Response: " + byte_debug)
 
         for callback in self.callbacks:
             callback(data)
 
-    def process_message(self, message):
-        self.log("Process message: " + str(message))        
-        return self.reactor.NEVER
-
     def handle_ready(self):
-        self.log("ready")        
+        self.log("Ready")
+        self._ready = True
+
+    def handle_disconnect(self):
+        self._ready = False    
 
     def log(self, msg, *args, **kwargs):
         logging.info("SERIAL BRIDGE: " + str(msg))
