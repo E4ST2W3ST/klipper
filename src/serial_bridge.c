@@ -55,22 +55,13 @@ DECL_COMMAND(command_config_serial_bridge,
 void
 command_serial_bridge_send(uint32_t *args)
 {
+    struct serial_bridge *sb = oid_lookup(args[0], command_config_serial_bridge);
     uint8_t data_len = args[1];
     uint8_t *data = command_decode_ptr(args[2]);
-    uint8_t config = args[3];
 
-    //output("sb %u", args[1]);
-
-    serial_bridge_send(data, data_len, config);
+    serial_bridge_send(data, data_len, sb->config);
 }
-DECL_COMMAND(command_serial_bridge_send, "serial_bridge_send oid=%c text=%*s config=%c");
-
-void
-command_serial_bridge_stats(uint32_t *args)
-{
-    //output("bridge_stats: %u/%u", 0, 0);
-}
-DECL_COMMAND(command_serial_bridge_stats, "serial_bridge_stats");
+DECL_COMMAND(command_serial_bridge_send, "serial_bridge_send oid=%c text=%*s");
 
 void
 serial_bridge_task(void)
@@ -80,11 +71,13 @@ serial_bridge_task(void)
 
     static uint8_t buf[SERIAL_BRIDGE_RX_BUFFER_SIZE];
 
-    uint32_t data_len = serial_bridge_get_data(buf, 2);
-    //uint8_t data_len2 = data_len;
-    if (data_len) {
-        //output("dl %u %s", data_len, buf);
-        sendf("serial_bridge_response text=%*s usart_index=%c", (uint8_t)data_len, buf, 2);
-    }
+    uint8_t oid;
+    struct serial_bridge *sb;
+    foreach_oid(oid, sb, command_config_serial_bridge) {
+        uint32_t data_len = serial_bridge_get_data(buf, sb->config);
+        if (data_len) {
+            sendf("serial_bridge_response oid=%c text=%*s", oid, (uint8_t)data_len, buf);
+        }
+    }    
 }
 DECL_TASK(serial_bridge_task);

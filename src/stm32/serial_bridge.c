@@ -102,6 +102,24 @@ serial_bridge_config_t configs[] = {
     #endif
 };
 
+uint8_t* serial_bridge_get_uart_index_from_config(uint8_t config){
+    for(int8_t i = 0; i <  (sizeof(configs) / sizeof(configs[0])); i++){
+        if(configs[i].number == config){
+            return &(configs[i].usart_index);
+        }
+    }
+    return NULL;
+}
+
+serial_bridge_config_t* serial_bridge_get_config_by_number(uint8_t number){
+    for(int8_t i = 0; i <  (sizeof(configs) / sizeof(configs[0])); i++){
+        if(configs[i].number == number){
+            return &configs[i];
+        }
+    }
+    return NULL;
+}
+
 serial_bridge_config_t* serial_bridge_get_active_config_for_usart(USART_TypeDef* usart){
     for(int8_t i = 0; i <  (sizeof(configs) / sizeof(configs[0])); i++){
         if(configs[i].usart == usart && configs[i].active){
@@ -148,32 +166,34 @@ USART6_serial_bridge_IRQHandler(void)
 
 void
 serial_bridge_enable_tx_irq(int8_t usart_index)
-{
-    if (usart_index < sizeof(configs) / sizeof(configs[0])) {
-        configs[usart_index].usart->CR1 = CR1_FLAGS | USART_CR1_TXEIE;
-    }     
+{    
+    for(int8_t i = 0; i < (sizeof(configs) / sizeof(configs[0])); i++){
+        if(configs[i].usart_index == usart_index && configs[i].active){
+            configs[i].usart->CR1 = CR1_FLAGS | USART_CR1_TXEIE;
+        }
+    }    
 }
 
 int8_t 
 serial_bridge_configure(uint8_t* config, uint32_t* baud)
 {
-    if (*config >= sizeof(configs) / sizeof(configs[0])) {
+    serial_bridge_config_t* s_config = serial_bridge_get_config_by_number(*config);
+    if (config == NULL) {
         return -1;
     } 
-    serial_bridge_config_t s_config = configs[*config];
-    s_config.baud = *baud;
-    s_config.active = 1;
+    s_config->baud = *baud;
+    s_config->active = 1;
 
-    enable_pclock((uint32_t)s_config.usart);
+    enable_pclock((uint32_t)s_config->usart);
 
-    uint32_t pclk = get_pclock_frequency((uint32_t)s_config.usart);
+    uint32_t pclk = get_pclock_frequency((uint32_t)s_config->usart);
     uint32_t div = DIV_ROUND_CLOSEST(pclk, *baud);
-    s_config.usart->BRR = (((div / 16) << USART_BRR_DIV_Mantissa_Pos)
+    s_config->usart->BRR = (((div / 16) << USART_BRR_DIV_Mantissa_Pos)
                    | ((div % 16) << USART_BRR_DIV_Fraction_Pos));
-    s_config.usart->CR1 = CR1_FLAGS;
+    s_config->usart->CR1 = CR1_FLAGS;
 
-    gpio_peripheral(s_config.rx_pin, GPIO_FUNCTION(s_config.rx_alt_function), 1);
-    gpio_peripheral(s_config.tx_pin, GPIO_FUNCTION(s_config.tx_alt_function), 0);
+    gpio_peripheral(s_config->rx_pin, GPIO_FUNCTION(s_config->rx_alt_function), 1);
+    gpio_peripheral(s_config->tx_pin, GPIO_FUNCTION(s_config->tx_alt_function), 0);
 
     return 0;
 }
@@ -192,6 +212,7 @@ serial_bridge_init(void)
     armcm_enable_irq(USART6_serial_bridge_IRQHandler, USART6_IRQn, 0);
     #endif
 
+    //assign indexes for the uart buffers that are in use
     for(int8_t i = 0; i < sizeof(configs)/sizeof(configs[0]); i++){
         for(int8_t j = 0; j < sizeof(usarts)/sizeof(usarts[0]); j++){
             if(usarts[j] == configs[i].usart){

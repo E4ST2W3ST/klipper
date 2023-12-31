@@ -14,10 +14,10 @@ void serial_bridge_rx_byte(uint_fast8_t data, uint8_t usart_index);
 int serial_bridge_get_tx_byte(uint8_t *pdata, uint8_t usart_index);
 
 // serial_bridge.c
-void serial_bridge_send(uint8_t* data, uint_fast8_t size, uint8_t usart_index);
+void serial_bridge_send(uint8_t* data, uint_fast8_t size, uint8_t config);
 
 // serial_bridge.c
-uint8_t serial_bridge_get_data(uint8_t* data, uint8_t usart_index);
+uint8_t serial_bridge_get_data(uint8_t* data, uint8_t config);
 
 int8_t serial_bridge_configure(uint8_t* usart_index, uint32_t* baud);
 

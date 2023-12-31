@@ -76,16 +76,16 @@ class PrinterSerialBridge:
         for chunk in chunks:
             byte_debug = ' '.join(['0x{:02x}'.format(byte) for byte in chunk])
             self.log("Sending message: " + byte_debug)
-            self.serial_bridge_send_cmd.send([self.oid, chunk])
+            self.serial_bridge_send_cmd.send([self.oid, chunk, 4])
 
     def build_config(self):
         rest_ticks = self.mcu.seconds_to_clock(QUERY_TIME)
         clock = self.mcu.get_query_slot(self.oid)
-        self.mcu.add_config_cmd("command_config_serial_bridge oid=%d clock=%d rest_ticks=%d" % (self.oid, clock, rest_ticks))
+        self.mcu.add_config_cmd("command_config_serial_bridge oid=%d clock=%d rest_ticks=%d config=%d baud=%u" % (self.oid, clock, rest_ticks, 4, 115200))
 
         cmd_queue = self.mcu.alloc_command_queue()
 
-        self.mcu.register_response(self._handle_serial_bridge_response, "serial_bridge_response")
+        self.mcu.register_response(self._handle_serial_bridge_response, "serial_bridge_response", self.oid)
         self.serial_bridge_send_cmd = self.mcu.lookup_command(
             "serial_bridge_send oid=%c text=%*s",
             cq=cmd_queue)        
