@@ -48,11 +48,11 @@ class NeptuneScreen:
         self.gcode = self.printer.lookup_object('gcode')
         self.gcode.register_output_handler(self.gcode_output_handler)
 
-        uart = config.get('uart')
+        bridge = config.get('serial_bridge')
        
-        self.variant = config.get('variant') or 'N3P'
+        self.variant = config.get('variant', '3Pro')
 
-        self.serial_bridge = self.printer.lookup_object(f'serial_bridge {uart}')
+        self.serial_bridge = self.printer.lookup_object(f'serial_bridge {bridge}')
         self.serial_bridge.register_callback(self._handle_serial_bridge_response)
 
         self._update_interval = 2
