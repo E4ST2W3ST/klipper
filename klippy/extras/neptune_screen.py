@@ -33,6 +33,8 @@ class NeptuneScreen:
 
         usart = config.get('usart')
        
+        self.variant = config.get('variant') or 'N3P'
+
         self.serial_bridge = self.printer.lookup_object(f'serial_bridge {usart}')
         self.serial_bridge.register_callback(self._handle_serial_bridge_response)
 
@@ -165,10 +167,21 @@ class NeptuneScreen:
         self.log("Screen init")
         self.serial_bridge.send_text("page boot") 
         self.serial_bridge.send_text("com_star") 
-        self.serial_bridge.send_text("main.va0.val=1") 
+        self.serial_bridge.send_text(f"main.va0.val={self._get_variant()}") 
         self.serial_bridge.send_text("page main") 
+        self.serial_bridge.send_text(f"information.sversion.txt=\"Klipper\"")
         self.reactor.update_timer(self._update_timer, eventtime + self._update_interval)
         return self.reactor.NEVER
+
+    def _get_variant(self):
+        if self.variant == "3Pro":
+            return 1
+        elif self.variant == "3Max":
+            return 3
+        elif self.variant == "3Plus":
+            return 2
+        else:
+            return 1
 
     def handle_ready(self):
         self.log("ready")
@@ -187,7 +200,7 @@ class NeptuneScreen:
         
     def send_text(self, text):
         self.serial_bridge.send_text(text)
-        
+
     def log(self, msg, *args, **kwargs):
         logging.info("Neptune Screen: " + str(msg))
 
