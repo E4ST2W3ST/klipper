@@ -24,7 +24,7 @@ typedef struct serial_bridge_config {
     uint8_t rx_alt_function;
     uint8_t tx_alt_function;
     uint32_t baud;
-    uint8_t active;    
+    uint8_t active;
     uint8_t usart_index;
 } serial_bridge_config_t;
 
@@ -36,7 +36,7 @@ DECL_CONSTANT("SERIAL_BRIDGE_CONFIG_USART1_PB7,PB6", 1);
 #if CONFIG_ENABLE_SERIAL_BRIDGE_USART2
 DECL_CONSTANT("SERIAL_BRIDGE_CONFIG_USART2_PD6,PD5", 2);
 DECL_CONSTANT("SERIAL_BRIDGE_CONFIG_USART2_PA3,PA2", 3);
-#endif    
+#endif
 #if CONFIG_ENABLE_SERIAL_BRIDGE_USART6
 DECL_CONSTANT("SERIAL_BRIDGE_CONFIG_USART6_PA12,PA11", 4);
 #endif
@@ -120,7 +120,8 @@ serial_bridge_config_t* serial_bridge_get_config_by_number(uint8_t number){
     return NULL;
 }
 
-serial_bridge_config_t* serial_bridge_get_active_config_for_usart(USART_TypeDef* usart){
+serial_bridge_config_t*
+serial_bridge_get_active_config_for_usart(USART_TypeDef* usart){
     for(int8_t i = 0; i <  (sizeof(configs) / sizeof(configs[0])); i++){
         if(configs[i].usart == usart && configs[i].active){
             return &configs[i];
@@ -149,38 +150,42 @@ void serial_bridge_handle_uart_irq(serial_bridge_config_t* config){
 void
 USART1_serial_bridge_IRQHandler(void)
 {
-   serial_bridge_handle_uart_irq(serial_bridge_get_active_config_for_usart(USART1));
+   serial_bridge_handle_uart_irq(
+        serial_bridge_get_active_config_for_usart(USART1));
 }
 
 void
 USART2_serial_bridge_IRQHandler(void)
 {
-    serial_bridge_handle_uart_irq(serial_bridge_get_active_config_for_usart(USART2));
+    serial_bridge_handle_uart_irq(
+        serial_bridge_get_active_config_for_usart(USART2));
 }
 
 void
 USART6_serial_bridge_IRQHandler(void)
 {
-    serial_bridge_handle_uart_irq(serial_bridge_get_active_config_for_usart(USART6));
+    serial_bridge_handle_uart_irq(
+        serial_bridge_get_active_config_for_usart(USART6));
 }
 
 void
 serial_bridge_enable_tx_irq(int8_t usart_index)
-{    
+{
     for(int8_t i = 0; i < (sizeof(configs) / sizeof(configs[0])); i++){
         if(configs[i].usart_index == usart_index && configs[i].active){
             configs[i].usart->CR1 = CR1_FLAGS | USART_CR1_TXEIE;
         }
-    }    
+    }
 }
 
-int8_t 
+int8_t
 serial_bridge_configure(uint8_t* config, uint32_t* baud)
 {
-    serial_bridge_config_t* s_config = serial_bridge_get_config_by_number(*config);
+    serial_bridge_config_t* s_config =
+        serial_bridge_get_config_by_number(*config);
     if (config == NULL) {
         return -1;
-    } 
+    }
     s_config->baud = *baud;
     s_config->active = 1;
 
@@ -192,8 +197,10 @@ serial_bridge_configure(uint8_t* config, uint32_t* baud)
                    | ((div % 16) << USART_BRR_DIV_Fraction_Pos));
     s_config->usart->CR1 = CR1_FLAGS;
 
-    gpio_peripheral(s_config->rx_pin, GPIO_FUNCTION(s_config->rx_alt_function), 1);
-    gpio_peripheral(s_config->tx_pin, GPIO_FUNCTION(s_config->tx_alt_function), 0);
+    gpio_peripheral(s_config->rx_pin,
+        GPIO_FUNCTION(s_config->rx_alt_function), 1);
+    gpio_peripheral(s_config->tx_pin,
+        GPIO_FUNCTION(s_config->tx_alt_function), 0);
 
     return 0;
 }

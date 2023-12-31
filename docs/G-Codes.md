@@ -1109,12 +1109,12 @@ has been enabled.
 send a serial message (TEXT) to the bridge specificed (BRIDGE).
 
 #### SERIAL_BRIDGE_LIST_CONFIGS
-`SERIAL_BRIDGE_LIST_CONFIGS`: This command will list the available 
+`SERIAL_BRIDGE_LIST_CONFIGS`: This command will list the available
 configurations reported by the MCU for use. This config should be used
 when setting up a new [serial_bridge](Config_Reference.md#serial_bridge).
 
 #### SERIAL_BRIDGE_LIST_BRIDGES
-`SERIAL_BRIDGE_LIST_BRIDGES`: This command will list the available 
+`SERIAL_BRIDGE_LIST_BRIDGES`: This command will list the available
 bridges ready for use from the printer configuration
 [serial_bridge](Config_Reference.md#serial_bridge).
 

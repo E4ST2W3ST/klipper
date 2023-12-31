@@ -3,7 +3,7 @@
 
 #include <stdint.h> // uint32_t
 
-#define SERIAL_BRIDGE_RX_BUFFER_SIZE 192
+#define SERIAL_BRIDGE_RX_BUFF_SIZE 192
 #define SERIAL_BRIDGE_NUMBER_OF_CONFIGS = 5
 
 // callback provided by board specific code
