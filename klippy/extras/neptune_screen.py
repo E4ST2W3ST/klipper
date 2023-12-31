@@ -40,9 +40,11 @@ class NeptuneScreen:
         self._logging = config.getboolean("logging", False)
         self.heaters = []
         self.leds = []
+        self._last_gcode_output = ""
 
         self.printer.register_event_handler("klippy:ready", self.handle_ready)       
         self.gcode = self.printer.lookup_object('gcode')
+        self.gcode.register_output_handler(self.gcode_output_handler)
 
         uart = config.get('uart')
        
@@ -53,6 +55,9 @@ class NeptuneScreen:
 
         self._update_interval = 2
         self._update_timer = self.reactor.register_timer(self._screen_update)                
+
+    def gcode_output_handler(self, msg):
+        self._last_gcode_output = msg
 
     def _screen_update(self, eventtime):        
         stats = self.printer.lookup_object("print_stats").get_status(self.reactor.monotonic())
@@ -160,13 +165,20 @@ class NeptuneScreen:
                     self.gcode.run_script(code)
                     if callback:
                         callback()
-                except Exception as e:
+                except Exception as e:                    
+                    self.send_text("page wait")
+                    self.updateTextVariable("wait.t1.txt", self._last_gcode_output)
                     self.send_text("beep 2000")
+                    self.reactor.register_timer(self.load_main_page, self.reactor.monotonic() + 4)
                     self.error("Error running gcode script: " + str(e))
 
                 self.log("Running delayed complete: " + code)
                 
             return self.reactor.NEVER
+
+    def load_main_page(self, eventtime):
+        self.send_text("page main")
+        return self.reactor.NEVER
 
     def _screen_init(self, eventtime):
         
@@ -251,7 +263,7 @@ class NeptuneScreen:
         self.serial_bridge.send_text(text)
 
     def log(self, msg, *args, **kwargs):
-        if self.logging:
+        if self._logging:
             logging.info("Neptune Screen: " + str(msg))
 
     def error(self, msg, *args, **kwargs):

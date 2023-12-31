@@ -152,7 +152,7 @@ class PrinterSerialBridge:
         self._ready = False    
 
     def log(self, msg, *args, **kwargs):
-        if self.logging:
+        if self._logging:
             logging.info(f"SERIAL BRIDGE {self.name}: " + str(msg))
 
     def warn(self, msg, *args, **kwargs):
