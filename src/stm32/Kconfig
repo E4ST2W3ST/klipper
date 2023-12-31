@@ -491,6 +491,18 @@ choice
         depends on HAVE_STM32_FDCANBUS
 endchoice
 
+config SERIAL_BRIDGE
+    bool "Enable serial bridge" if LOW_LEVEL_OPTIONS
+    depends on MACH_STM32
+    default n
+choice
+    depends on SERIAL_BRIDGE
+    prompt "Serial bridge Port" if LOW_LEVEL_OPTIONS && (MACH_STM32)
+    help
+        Select the serial device to use as SERIAL BRIDGE.
+    config STM32_SERIAL_BRIDGE_PA11_PA12
+        bool "Serial Bridge (on PA11/PA12)"          
+endchoice
 
 config STM32_CANBUS_PB8_PB9
     bool

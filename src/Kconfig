@@ -57,6 +57,16 @@ config SERIAL_BAUD
         Specify the baud rate of the serial port. This should be set
         to 250000. Read the FAQ before changing this value.
 
+ config SERIAL_BRIDGE_BAUD
+    depends on SERIAL_BRIDGE
+    int "Baud rate for serial bridge" if LOW_LEVEL_OPTIONS
+    default 115200
+    help
+        Specify the baud rate of the serial bridge. This should be set
+        to 115200. Read the FAQ before changing this value.        
+
+
+
 # Generic configuration options for USB
 config USBSERIAL
     bool
